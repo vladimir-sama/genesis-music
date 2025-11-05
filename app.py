@@ -12,6 +12,9 @@ from ytmusicapi.exceptions import YTMusicUserError
 import yt_dlp, json, shutil, subprocess
 from typing import Optional, TypedDict, Union, Any
 
+
+version : str = '2025.11.05'
+
 file_dir : str = os.path.dirname(os.path.realpath(__file__))
 frozen_dir = os.path.dirname(sys.executable)
 executable_dir : str = os.path.dirname(os.path.realpath(__file__))
@@ -28,7 +31,7 @@ class Track(TypedDict):
     title:str
     url:str
 
-from PySide6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox, QLineEdit, QLabel
+from PySide6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox
 
 class AddPlaylistDialog(QDialog):
     def __init__(self, parent=None) -> None:
@@ -66,7 +69,8 @@ class MusicPlayer(QWidget):
         if not os.path.exists(self.local_playlist_path):
             with open(self.local_playlist_path, 'w') as file:
                 json.dump({}, file)
-        
+
+        self.use_cookies : bool = False
 
         self.config: configparser.ConfigParser = configparser.ConfigParser()
         self.config.read(os.path.join(executable_dir, 'app.ini'))
@@ -100,13 +104,14 @@ class MusicPlayer(QWidget):
             self.playlist.update({f'YT - {k}': v for k, v in json.load(file).items()})
         with open(self.local_playlist_path, 'r') as file:
             self.playlist.update({f'LOCAL - {k}': v for k, v in json.load(file).items()})
-        
+
         for f in glob.glob(os.path.join(instance_path, 'cache_*.json')):
             name : str = os.path.splitext(os.path.basename(f))[0].replace('cache_', '')
             self.playlist[f'CACHE - {name}'] = f
 
         self.playlist['RECENTS'] = 'RECENTS'
         self.playlist['SEARCH YT'] = 'SEARCH'
+        self.playlist['SEARCH PLAYLIST'] = 'SEARCH_PLAYLIST'
         self.playlist_titles = list(self.playlist.keys())
 
     def init_ui(self) -> None:
@@ -144,8 +149,11 @@ class MusicPlayer(QWidget):
     def load_playlist(self, playlist_url:str) -> None:
         if not playlist_url:
             return
-        
+
         if playlist_url == 'SEARCH':
+            self.tracks = []
+            self.update_track_list()
+        elif playlist_url == 'SEARCH_PLAYLIST':
             self.tracks = []
             self.update_track_list()
         elif playlist_url == 'RECENTS':
@@ -221,12 +229,21 @@ class MusicPlayer(QWidget):
                 else:
                     self.entry_filter.clear()
                 return
-        
+            case '/FIX':
+                self.use_cookies = not self.use_cookies
+                self.entry_filter.clear()
+                return
+
         match self.selected_playlist:
             case 'SEARCH YT':
                 term : str = self.entry_filter.text().lower()
                 results : list[dict] = self.yt_music_api.search(term, filter='songs')
                 self.tracks = [{'title': item['title'], 'url': f'https://music.youtube.com/watch?v={item['videoId']}'} for item in results]
+                self.update_track_list()
+            case 'SEARCH PLAYLIST':
+                term : str = self.entry_filter.text().lower()
+                results : list[dict] = self.yt_music_api.search(term, filter='playlists')
+                self.tracks = [{'title': item['title'], 'url': f'https://music.youtube.com/playlist?list={item['browseId'].removeprefix('VL')}'} for item in results]
                 self.update_track_list()
 
     def select_track(self) -> None:
@@ -234,6 +251,11 @@ class MusicPlayer(QWidget):
         if not current_item:
             return
         index : int = int(current_item.text().split('.')[0]) - 1
+        if self.selected_playlist == 'SEARCH PLAYLIST':
+            if self.tracks[index]['url'].startswith('https://music.youtube.com/playlist?list='):
+                playlist_url : str = self.tracks[index]['url']
+                self.load_playlist(playlist_url)
+                return
         self.track_url = self.tracks[index]['url']
         self.track_text = self.tracks[index]['title']
         self.play_track()
@@ -256,35 +278,38 @@ class MusicPlayer(QWidget):
             self.player.terminate()
         self.label_track.setText(self.track_text)
 
-        if self.track_url.startswith('https://music.youtube.com/watch?v=') or self.track_url.startswith('https://youtube.com/watch?v='):
-            video_id : str = self.track_url.split('=')[-1]
-            try:
-                details : dict = self.yt_music_api.get_song(video_id)
-                if details:
-                    self.label_track.setText(details['videoDetails']['title'])
-            except (KeyError, YTMusicUserError):
-                pass
-        else:
-            self.label_track.setText(os.path.basename(self.track_url))
-
         if self.track_url:
+            if self.track_url.startswith('https://music.youtube.com/watch?v=') or self.track_url.startswith('https://youtube.com/watch?v='):
+                video_id : str = self.track_url.split('=')[-1]
+                try:
+                    details : dict = self.yt_music_api.get_song(video_id)
+                    if details:
+                        self.label_track.setText(details['videoDetails']['title'])
+                except (KeyError, YTMusicUserError):
+                    pass
+            else:
+                self.label_track.setText(os.path.basename(self.track_url))
+
             self.add_to_recents({
                 'title': self.track_text,
                 'url': self.track_url
             })
+            mpv_path : Optional[str] = shutil.which('mpv')
+            if not mpv_path:
+                raise RuntimeError('MPV not found in PATH.')
+            command : list[str] = [
+                mpv_path,
+                '--ytdl=yes',
+                '--osc=yes',
+                '--force-window=yes',
+                '--loop=inf',
+                self.track_url
+            ]
+            if self.use_cookies:
+                command.append('--ytdl-raw-options=cookies-from-browser=firefox')
 
-            self.player = subprocess.Popen(
-                [
-                    shutil.which('mpv'),
-                    '--ytdl=yes',
-                    # '--ytdl-raw-options=cookies-from-browser=firefox',
-                    '--osc=yes',
-                    '--force-window=yes',
-                    '--loop=inf',
-                    self.track_url
-                ]
-            )
-    
+            self.player = subprocess.Popen(command)
+
     def add_to_recents(self, track: Track) -> None:
         recents: list[Track] = []
         if os.path.exists(self.recents_path):
