@@ -52,9 +52,13 @@ python app.py
 ## 🎮 Usage
 
 Launch the app
+
 Use the search bar to find YouTube Music content
+
 Use /ADD to import a YouTube playlist or local folder
+
 Select a playlist from the dropdown
+
 Click tracks to play via MPV
 
 
